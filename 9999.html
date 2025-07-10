@@ -1,0 +1,98 @@
+# app.py (Clean Version: Full Technical Binary Analyzer AI Tool)
+
+import os
+import time
+import cv2
+import numpy as np
+from flask import Flask, render_template, request
+from werkzeug.utils import secure_filename
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'uploads'
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    file = request.files['screenshot']
+    if file:
+        filename = secure_filename(file.filename)
+        path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(path)
+        time.sleep(5)
+        signal = analyze_image(path)
+        return render_template("index.html", signal=signal)
+    return render_template("index.html", signal="No file uploaded.")
+
+def analyze_image(image_path):
+    img = cv2.imread(image_path)
+    if img is None:
+        return "Image read error"
+
+    height, width, _ = img.shape
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # ========== EMA Signal ==========
+    ema_zone = img[int(height*0.3):int(height*0.7), :]
+    green_mask = cv2.inRange(ema_zone, (0, 100, 0), (100, 255, 100))
+    red_mask = cv2.inRange(ema_zone, (0, 0, 100), (100, 100, 255))
+    green_area = cv2.countNonZero(green_mask)
+    red_area = cv2.countNonZero(red_mask)
+    ema_signal = "CALL" if green_area > red_area else "PUT"
+
+    # ========== RSI Signal ==========
+    rsi_zone = gray[int(height*0.85):, :]
+    rsi_value = np.mean(rsi_zone)
+    rsi_signal = "CALL" if rsi_value < 100 else "PUT" if rsi_value > 150 else "NEUTRAL"
+
+    # ========== Candle Pattern ==========
+    pattern_zone = gray[int(height*0.3):int(height*0.7), :]
+    _, thresh = cv2.threshold(pattern_zone, 180, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candles = [(cv2.boundingRect(c)) for c in contours if 10 < cv2.boundingRect(c)[2] < 50 and 30 < cv2.boundingRect(c)[3] < 200]
+    candles = sorted(candles, key=lambda c: c[0])
+    
+    engulf_signal = "NEUTRAL"
+    wicktrap_signal = "NEUTRAL"
+    priceflow_signal = "NEUTRAL"
+    liquidity_signal = "NEUTRAL"
+
+    if len(candles) >= 3:
+        c1, c2, c3 = candles[-3], candles[-2], candles[-1]
+
+        if c3[2]*c3[3] > 1.5 * c2[2]*c2[3]:
+            engulf_signal = "CALL"
+        elif c2[2]*c2[3] > 1.5 * c3[2]*c3[3]:
+            engulf_signal = "PUT"
+
+        if c3[3] > 60 and c3[2] < 15:
+            wicktrap_signal = "PUT" if c3[1] < c2[1] else "CALL"
+
+        if c1[3] < c2[3] < c3[3]:
+            priceflow_signal = "CALL"
+        elif c1[3] > c2[3] > c3[3]:
+            priceflow_signal = "PUT"
+
+        heights = [h for x, y, w, h in [c1, c2, c3]]
+        if max(heights) - min(heights) < 20:
+            liquidity_signal = "PUT" if c3[1] < c2[1] else "CALL"
+
+    # ========== Support/Resistance ==========
+    top_zone = gray[:int(height*0.1), :]
+    bottom_zone = gray[int(height*0.9):, :]
+    top_brightness = np.mean(top_zone)
+    bottom_brightness = np.mean(bottom_zone)
+    sr_signal = "CALL" if bottom_brightness < 100 else "PUT" if top_brightness < 100 else "NEUTRAL"
+
+    # ========== Combine All Signals ==========
+    signals = [ema_signal, rsi_signal, engulf_signal, wicktrap_signal, priceflow_signal, liquidity_signal, sr_signal]
+    filtered = [s for s in signals if s in ["CALL", "PUT"]]
+    final = max(set(filtered), key=filtered.count) if filtered else "NEUTRAL"
+
+    return final
+
+if __name__ == '__main__':
+    app.run(debug=True)
